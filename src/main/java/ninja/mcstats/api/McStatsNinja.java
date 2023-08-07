@@ -1,6 +1,5 @@
 package ninja.mcstats.api;
 
-import ninja.mcstats.api.exception.NinjaAlreadyInitializedException;
 import ninja.mcstats.api.packages.client.auth.TokenAuthentication;
 import ninja.mcstats.api.packages.server.TestMessage;
 import ninja.mcstats.api.packages.server.auth.ValidatedTokenAuthentication;
@@ -44,10 +43,8 @@ public class McStatsNinja {
         }
     }
 
-    public static Ninja init(String key) throws NinjaAlreadyInitializedException {
-        if (ninjas.containsKey(key))
-            throw new NinjaAlreadyInitializedException(key, ninjas.get(key));
-        return new Ninja(key);
+    public static Ninja init(String key) {
+        return ninjas.getOrDefault(key, new Ninja(key));
     }
 
     public void handle(Object object) {
