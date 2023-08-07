@@ -10,7 +10,9 @@ import java.util.function.Supplier;
 public class Ninja {
 
     private final List<String> knownShurikenKeys = new ArrayList<>();
+    private final List<String> knownIdentifierKeys = new ArrayList<>();
     private final HashMap<String, Shuriken<?>> shurikens = new HashMap<>();
+    private final HashMap<String, Identifier<?>> identifiers = new HashMap<>();
     private State state = State.UNINITIALIZED;
 
     protected Ninja(String key) {
@@ -29,6 +31,14 @@ public class Ninja {
         private final Supplier<T> value;
 
         public Shuriken(Supplier<T> value) {
+            this.value = value;
+        }
+    }
+
+    public static class Identifier<T> {
+        private final Supplier<T> value;
+
+        public Identifier(Supplier<T> value) {
             this.value = value;
         }
     }
