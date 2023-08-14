@@ -1,8 +1,11 @@
 package ninja.mcstats.api;
 
+import ninja.mcstats.api.packages.client.Hearthbeat;
 import ninja.mcstats.api.packages.client.auth.TokenAuthentication;
 import ninja.mcstats.api.packages.server.TestMessage;
 import ninja.mcstats.api.packages.server.auth.ValidatedTokenAuthentication;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.naming.Context;
 import javax.naming.NamingException;
@@ -17,23 +20,44 @@ import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Hashtable;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class McStatsNinja {
 
     private static final McStatsNinja INSTANCE = new McStatsNinja();
     protected static HashMap<String, Ninja> ninjas = new HashMap<>();
+    Logger logger = LoggerFactory.getLogger("McStats.Ninja");
     private State state = State.UNINITIALIZED;
     private Socket socket;
     private ObjectOutputStream out;
     private ObjectInputStream in;
+    private final Thread heartbeat = new Thread(() -> {
+        while (true) {
+            try {
+                TimeUnit.SECONDS.sleep(30);
+                logger.info("Connected: " + (socket == null ? "null" : socket.isConnected()));
+                logger.info("Closed: " + (socket == null ? "null" : socket.isClosed()));
+                logger.info("Output: " + (out != null));
+                logger.info("Input: " + (in != null));
+                logger.info("Sende Hearthbeat...");
+                send(new Hearthbeat());
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    });
     private final Thread connection = new Thread(this::connect);
 
     protected McStatsNinja() {
         state = State.LOADING;
         connection.start();
+        heartbeat.start();
         while (state != State.INITIALIZED) {
             try {
                 TimeUnit.MILLISECONDS.sleep(100);
@@ -50,138 +74,191 @@ public class McStatsNinja {
     public void handle(Object object) {
         if (object == null) return;
         if (object instanceof ValidatedTokenAuthentication) {
-            System.out.println("Token validiert.");
+            logger.info("Token validiert.");
             state = State.INITIALIZED;
             return;
         }
         if (object instanceof String message) {
-            System.out.println("Empfangene Nachricht: " + message);
+            logger.info("Empfangene Nachricht: " + message);
         } else if (object instanceof TestMessage testMessage) {
-            System.out.println("Empfangene Test Nachricht: " + testMessage.getMessage());
+            logger.info("Empfangene Test Nachricht: " + testMessage.getMessage());
         } else {
-            System.out.println("Ungültiges Objekt empfangen.");
+            logger.warn("Ungültiges Objekt empfangen.");
         }
     }
 
     public void send(Object object) {
+        if (out == null) return;
+        logger.info("Sende Objekt: " + object.toString());
         try {
             out.writeObject(object);
             out.flush();
         } catch (IOException e) {
-            e.printStackTrace();
+            logger.warn("Fehler beim Senden des Objekts: " + object + " ( " + e.getLocalizedMessage() + " )");
+            try {
+                socket.close();
+                socket = null;
+                in.close();
+                in = null;
+                out.close();
+                out = null;
+            } catch (IOException ex) {
+                throw new RuntimeException(ex);
+            }
         }
+    }
+
+    private ArrayList<SrvRecord> getRecords() {
+        ArrayList<SrvRecord> records = new ArrayList<>();
+        try {
+            Hashtable<String, String> env = new Hashtable<>();
+            env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.dns.DnsContextFactory");
+            DirContext ctx = new InitialDirContext(env);
+            Attributes attrs = ctx.getAttributes("_bacon._tcp.mcstats.ninja", new String[]{"SRV"});
+            if (attrs != null) {
+                Attribute srvAttr = attrs.get("SRV");
+                if (srvAttr != null) {
+                    for (int i = 0; i < srvAttr.size(); i++) {
+                        String srvRecord = (String) srvAttr.get(i);
+                        String[] parts = srvRecord.split(" ");
+
+                        int priority = Integer.parseInt(parts[0]);
+                        int weight = Integer.parseInt(parts[1]);
+                        int port = Integer.parseInt(parts[2]);
+                        String hostname = parts[3];
+                        SrvRecord record = new SrvRecord(priority, weight, port, hostname);
+                        records.add(record);
+                        logger.info("SRV-Eintrag gefunden: " + record + " ( " + records.size() + " ) ");
+                    }
+                } else {
+                    logger.warn("Kein SRV-Eintrag gefunden.");
+                }
+                return records;
+            }
+        } catch (NamingException e) {
+            throw new RuntimeException(e);
+        }
+        return new ArrayList<>(0);
+    }
+
+    private Socket getBestServer() {
+        AtomicReference<Socket> bestSocket = new AtomicReference<>(null);
+
+        while (bestSocket.get() == null) {
+            List<SrvRecord> records = getRecords();
+            logger.info("Suche nach Server...");
+
+            while (records.isEmpty()) {
+                logger.warn("Keine Server Records gefunden. Automatischer Reconnect in 60 Sekunden...");
+                try {
+                    TimeUnit.MINUTES.sleep(1);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                records = getRecords();
+            }
+
+            AtomicInteger bestPing = new AtomicInteger(Integer.MAX_VALUE);
+            List<Thread> connectionThreads = new ArrayList<>();
+
+            for (int i = 0; i < records.size(); i++) {
+                logger.info("Verbinde mit Server " + (i + 1) + "/" + records.size());
+                SrvRecord record = records.get(i);
+                Thread thread = new Thread(() -> {
+                    logger.info("Verbinde mit Server: " + record.hostname() + ":" + record.port());
+                    try {
+                        Socket tempSocket = new Socket();
+                        long startTime = System.currentTimeMillis();
+                        tempSocket.connect(new InetSocketAddress(record.hostname(), record.port()), 5000);
+                        long endTime = System.currentTimeMillis();
+                        long time = endTime - startTime;
+                        long pingTime = (time > 5000 ? -1 : time);
+                        logger.info("Ping für " + record.hostname() + ":" + record.port() + ": " + pingTime);
+                        if (pingTime >= 0 && pingTime < bestPing.get()) {
+                            bestPing.set((int) pingTime);
+                            bestSocket.set(tempSocket);
+                            logger.info("Server " + record.hostname() + ":" + record.port() + " ist der beste Server.");
+                            // Hier Abbruch der anderen Threads
+                            connectionThreads.forEach(Thread::interrupt);
+                        } else {
+                            tempSocket.close();
+                        }
+                    } catch (IOException e) {
+                        logger.warn("Verbindung zu " + record.hostname() + " ist fehlgeschlagen.");
+                    }
+                });
+                connectionThreads.add(thread);
+                thread.start();
+            }
+
+            // Warte auf das Ende aller Threads
+            for (Thread thread : connectionThreads) {
+                try {
+                    thread.join();
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            if (bestSocket.get() == null) {
+                logger.warn("Kein Server erreichbar. Automatischer Reconnect in 60 Sekunden...");
+                try {
+                    TimeUnit.MINUTES.sleep(1);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        }
+        return bestSocket.get();
     }
 
     private void connect() {
         while (true) {
             try {
-                Socket bestSocket = null;
-                long lowestPing = Long.MAX_VALUE;
-
+                socket = getBestServer();
                 try {
-                    Hashtable<String, String> env = new Hashtable<>();
-                    env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.dns.DnsContextFactory");
-                    DirContext ctx = new InitialDirContext(env);
-                    Attributes attrsTxt = ctx.getAttributes("mcstats.ninja", new String[]{"TXT"});
-                    System.out.println("TXT: " + attrsTxt);
-                    Attributes attrs = ctx.getAttributes("_bacon._tcp.mcstats.ninja", new String[]{"SRV"});
-                    int maxPing = 5;
-                    if (attrs != null) {
-                        Attribute srvAttr = attrs.get("SRV");
-                        if (srvAttr != null) {
-                            while (bestSocket == null) {
-                                System.out.println("MaxPing: " + maxPing);
-                                for (int i = 0; i < srvAttr.size(); i++) {
-                                    System.out.println("-----------------------");
-                                    String srvRecord = (String) srvAttr.get(i);
-                                    String[] parts = srvRecord.split(" ");
+                    out = new ObjectOutputStream(socket.getOutputStream());
+                    in = new ObjectInputStream(socket.getInputStream());
 
-                                    int priority = Integer.parseInt(parts[0]);
-                                    int weight = Integer.parseInt(parts[1]);
-                                    int port = Integer.parseInt(parts[2]);
-                                    String hostname = parts[3];
+                    send(new TokenAuthentication("test"));
 
-                                    System.out.println("Priority: " + priority);
-                                    System.out.println("Weight: " + weight);
-                                    System.out.println("Port: " + port);
-                                    System.out.println("Hostname: " + hostname);
-
-                                    System.out.println("Pinge " + hostname + ":" + port + "...");
-
-                                    long startTime = System.currentTimeMillis();
-                                    try {
-                                        Socket socket1 = new Socket();
-                                        socket1.connect(new InetSocketAddress(hostname, port), maxPing);
-                                        long endTime = System.currentTimeMillis();
-                                        long time = endTime - startTime;
-                                        long pingTime = (time > maxPing ? -1 : time);
-                                        System.out.println("Ping: " + pingTime);
-                                        if (pingTime >= 0 && pingTime < lowestPing) {
-                                            if (bestSocket != null) bestSocket.close();
-                                            lowestPing = pingTime;
-                                            bestSocket = socket1;
-                                        } else {
-                                            socket1.close();
-                                        }
-                                    } catch (IOException ignored) {
-                                        System.out.println("Ping: zu hoch!");
-                                    }
-                                    System.out.println("-----------------------");
-                                }
-                                maxPing += 50;
-                            }
-                        } else {
-                            System.out.println("Kein SRV-Eintrag gefunden.");
+                    while (true) {
+                        try {
+                            handle(in.readObject());
+                        } catch (EOFException ignored) {
                         }
                     }
-                } catch (NamingException e) {
+
+                } catch (SocketException e) {
                     e.printStackTrace();
-                }
-                if (bestSocket != null) {
-                    System.out.println("Bester Server: " + bestSocket.getInetAddress().getHostAddress() + ":" + bestSocket.getPort() + " mit einem Ping von " + lowestPing + " ms");
-                    socket = bestSocket;
-                    try {
-                        System.out.println("Verbunden mit Server.");
-
-                        out = new ObjectOutputStream(socket.getOutputStream());
-                        in = new ObjectInputStream(socket.getInputStream());
-
-                        send(new TokenAuthentication("test"));
-
-                        while (true) {
-                            try {
-                                Object receivedObject = in.readObject();
-                                handle(receivedObject);
-                            } catch (EOFException ignored) {
-                            }
-                        }
-                    } catch (SocketException e) {
-                        System.out.println(e.getMessage());
-                        state = State.ERROR;
-                        System.out.println("Verbindung zum Server fehlgeschlagen. Automatischer Reconnect in 5 Sekunden...");
-                        TimeUnit.SECONDS.sleep(5);
-                    } catch (ClassNotFoundException e) {
-                        throw new RuntimeException(e);
-                    } finally {
-                        // Hier solltest du sicherstellen, dass die Socket-Verbindung geschlossen wird
-                        if (socket != null && !socket.isClosed()) {
-                            try {
-                                socket.close();
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
+                    socket = null;
+                    out = null;
+                    in = null;
+                    logger.warn("Verbindung zum Server verloren. Automatischer Reconnect in 5 Sekunden...");
+                    state = State.ERROR;
+                    TimeUnit.SECONDS.sleep(5);
+                } catch (ClassNotFoundException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    if (socket != null && !socket.isClosed()) {
+                        try {
+                            socket.close();
+                        } catch (IOException e) {
+                            logger.warn("AHHHHHHHHHHHH 2");
+                            e.printStackTrace();
                         }
                     }
-                } else {
-                    System.out.println("Kein Server erreichbar.");
-                    System.out.println("Verbindung zum Server fehlgeschlagen. Automatischer Reconnect in 60 Sekunden...");
-                    TimeUnit.MINUTES.sleep(1);
                 }
-
-
             } catch (IOException | InterruptedException e) {
+                logger.warn("AHHHHHHHHHHHH 1");
                 e.printStackTrace();
             }
+        }
+    }
+
+    private record SrvRecord(int priority, int weight, int port, String hostname) {
+        @Override
+        public String toString() {
+            return "Priority: " + priority + ", Weight: " + weight + ", Port: " + port + ", Hostname: " + hostname;
         }
     }
 }
