@@ -5,16 +5,16 @@ import ninja.mcstats.api.models.Session;
 import java.io.Serializable;
 import java.util.Date;
 
-public class SessionInitiated implements Serializable {
-    private final Session session;
+public class SessionUpdated implements Serializable {
 
-    private final Date date = new Date();
-    
-    public SessionInitiated(Session session){
+    private Session session;
+    private Date date = new Date();
+
+    public SessionUpdated(Session session){
         this.session = session;
     }
 
-    public Session session(){
+    public Session session() {
         return session;
     }
 

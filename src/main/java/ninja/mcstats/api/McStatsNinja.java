@@ -1,11 +1,8 @@
 package ninja.mcstats.api;
 
-import ninja.mcstats.api.packages.client.Hearthbeat;
 import ninja.mcstats.api.packages.client.auth.TokenAuthentication;
 import ninja.mcstats.api.packages.server.TestMessage;
 import ninja.mcstats.api.packages.server.auth.ValidatedTokenAuthentication;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.naming.Context;
 import javax.naming.NamingException;
@@ -20,7 +17,6 @@ import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
@@ -28,11 +24,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static ninja.mcstats.api.McStatsNinja.State.*;
+
 public class McStatsNinja {
 
     private static final McStatsNinja INSTANCE = new McStatsNinja();
     protected static HashMap<String, Ninja> ninjas = new HashMap<>();
-    Logger logger = LoggerFactory.getLogger("McStats.Ninja");
     private State state = State.UNINITIALIZED;
     private Socket socket;
     private ObjectOutputStream out;
@@ -54,10 +51,11 @@ public class McStatsNinja {
     });
     private final Thread connection = new Thread(this::connect);
 
+    private Network network;
+
     protected McStatsNinja() {
-        state = State.LOADING;
+        state = LOADING;
         connection.start();
-        heartbeat.start();
         while (state != State.INITIALIZED) {
             try {
                 TimeUnit.MILLISECONDS.sleep(100);
@@ -74,9 +72,15 @@ public class McStatsNinja {
     public void handle(Object object) {
         if (object == null) return;
         if (object instanceof ValidatedTokenAuthentication) {
-            logger.info("Token validiert.");
+            System.out.println("Token validiert.");
             state = State.INITIALIZED;
             return;
+        }
+        if (object instanceof SessionCancelled cancelled) {
+            System.out.println("Session abgebrochen: " + cancelled.reason());
+        }
+        if (object instanceof SessionInitiated initiated) {
+            System.out.println("Session gestartet: " + initiated.session());
         }
         if (object instanceof String message) {
             logger.info("Empfangene Nachricht: " + message);
@@ -219,32 +223,30 @@ public class McStatsNinja {
                     out = new ObjectOutputStream(socket.getOutputStream());
                     in = new ObjectInputStream(socket.getInputStream());
 
-                    send(new TokenAuthentication("test"));
+                        send(new TokenAuthentication("test"));
 
-                    while (true) {
-                        try {
-                            handle(in.readObject());
-                        } catch (EOFException ignored) {
+                        while (true) {
+                            try {
+                                Object receivedObject = in.readObject();
+                                handle(receivedObject);
+                            } catch (EOFException ignored) {
+                            }
                         }
-                    }
-
-                } catch (SocketException e) {
-                    e.printStackTrace();
-                    socket = null;
-                    out = null;
-                    in = null;
-                    logger.warn("Verbindung zum Server verloren. Automatischer Reconnect in 5 Sekunden...");
-                    state = State.ERROR;
-                    TimeUnit.SECONDS.sleep(5);
-                } catch (ClassNotFoundException e) {
-                    throw new RuntimeException(e);
-                } finally {
-                    if (socket != null && !socket.isClosed()) {
-                        try {
-                            socket.close();
-                        } catch (IOException e) {
-                            logger.warn("AHHHHHHHHHHHH 2");
-                            e.printStackTrace();
+                    } catch (SocketException e) {
+                        System.out.println(e.getMessage());
+                        state = State.ERROR;
+                        System.out.println("Verbindung zum Server fehlgeschlagen. Automatischer Reconnect in 5 Sekunden...");
+                        TimeUnit.SECONDS.sleep(5);
+                    } catch (ClassNotFoundException e) {
+                        throw new RuntimeException(e);
+                    } finally {
+                        // Hier solltest du sicherstellen, dass die Socket-Verbindung geschlossen wird
+                        if (socket != null && !socket.isClosed()) {
+                            try {
+                                socket.close();
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
                         }
                     }
                 }
@@ -252,13 +254,6 @@ public class McStatsNinja {
                 logger.warn("AHHHHHHHHHHHH 1");
                 e.printStackTrace();
             }
-        }
-    }
-
-    private record SrvRecord(int priority, int weight, int port, String hostname) {
-        @Override
-        public String toString() {
-            return "Priority: " + priority + ", Weight: " + weight + ", Port: " + port + ", Hostname: " + hostname;
         }
     }
 }

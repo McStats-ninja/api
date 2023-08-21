@@ -1,30 +1,42 @@
 package ninja.mcstats.api;
 
-import ninja.mcstats.api.exception.UnknownShurikenKeyException;
-
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 public class Ninja {
 
-    private final List<String> knownShurikenKeys = new ArrayList<>();
-    private final List<String> knownIdentifierKeys = new ArrayList<>();
-    private final HashMap<String, Shuriken<?>> shurikens = new HashMap<>();
-    private final HashMap<String, Identifier<?>> identifiers = new HashMap<>();
+    private HashMap<String, Shuriken<?>> shurikens = new HashMap<>();
+    private ArrayList<String> knownShurikens = new ArrayList<>();
+
     private State state = State.UNINITIALIZED;
 
     protected Ninja(String key) {
         McStatsNinja.ninjas.put(key, this);
-        state = State.LOADING;
     }
 
-    public void addShuriken(String key, Shuriken<?> shuriken) throws UnknownShurikenKeyException {
-        if (!knownShurikenKeys.contains(key))
-            throw new UnknownShurikenKeyException("Unknown Shuriken Key: " + key);
+    public Shuriken<?> shuriken(String key, Shuriken<?> shuriken) {
         shurikens.put(key, shuriken);
+        return shurikens.get(key);
     }
+
+    protected void knownShurikens(ArrayList<String> known) {
+        this.knownShurikens = known;
+    }
+
+    public Optional<Shuriken<?>> shuriken(String key) {
+        return shurikens.get(key) == null ? Optional.empty() : Optional.of(shurikens.get(key));
+    }
+
+
+    /*
+     * Types:
+     *  - Active: Based on events to send data
+     *  - OTD: One time data
+     *
+     *
+     */
 
 
     public static class Shuriken<T> {
@@ -33,14 +45,17 @@ public class Ninja {
         public Shuriken(Supplier<T> value) {
             this.value = value;
         }
+
+        public void send(T data) {
+
+        }
     }
 
-    public static class Identifier<T> {
-        private final Supplier<T> value;
-
-        public Identifier(Supplier<T> value) {
-            this.value = value;
-        }
+    enum State {
+        LOADING,
+        READY,
+        UNINITIALIZED,
+        INITIALIZED, ERROR
     }
 
 
