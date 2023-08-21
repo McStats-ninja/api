@@ -1,8 +1,12 @@
 package ninja.mcstats.api;
 
-import ninja.mcstats.api.packages.client.auth.TokenAuthentication;
+import ninja.mcstats.api.models.Network;
+import ninja.mcstats.api.packages.client.Hearthbeat;
 import ninja.mcstats.api.packages.server.TestMessage;
-import ninja.mcstats.api.packages.server.auth.ValidatedTokenAuthentication;
+import ninja.mcstats.api.packages.server.session.SessionCancelled;
+import ninja.mcstats.api.packages.server.session.SessionInitiated;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.naming.Context;
 import javax.naming.NamingException;
@@ -17,6 +21,7 @@ import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Hashtable;
 import java.util.List;
@@ -24,13 +29,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static ninja.mcstats.api.McStatsNinja.State.*;
+import static ninja.mcstats.api.Ninja.State.*;
 
 public class McStatsNinja {
 
     private static final McStatsNinja INSTANCE = new McStatsNinja();
     protected static HashMap<String, Ninja> ninjas = new HashMap<>();
-    private State state = State.UNINITIALIZED;
+    Logger logger = LoggerFactory.getLogger(McStatsNinja.class);
+    private Ninja.State state = UNINITIALIZED;
     private Socket socket;
     private ObjectOutputStream out;
     private ObjectInputStream in;
@@ -56,7 +62,7 @@ public class McStatsNinja {
     protected McStatsNinja() {
         state = LOADING;
         connection.start();
-        while (state != State.INITIALIZED) {
+        while (state != INITIALIZED) {
             try {
                 TimeUnit.MILLISECONDS.sleep(100);
             } catch (InterruptedException e) {
@@ -71,11 +77,7 @@ public class McStatsNinja {
 
     public void handle(Object object) {
         if (object == null) return;
-        if (object instanceof ValidatedTokenAuthentication) {
-            System.out.println("Token validiert.");
-            state = State.INITIALIZED;
-            return;
-        }
+
         if (object instanceof SessionCancelled cancelled) {
             System.out.println("Session abgebrochen: " + cancelled.reason());
         }
@@ -142,7 +144,7 @@ public class McStatsNinja {
         } catch (NamingException e) {
             throw new RuntimeException(e);
         }
-        return new ArrayList<>(0);
+        return new ArrayList<SrvRecord>(0);
     }
 
     private Socket getBestServer() {
@@ -223,30 +225,27 @@ public class McStatsNinja {
                     out = new ObjectOutputStream(socket.getOutputStream());
                     in = new ObjectInputStream(socket.getInputStream());
 
-                        send(new TokenAuthentication("test"));
-
-                        while (true) {
-                            try {
-                                Object receivedObject = in.readObject();
-                                handle(receivedObject);
-                            } catch (EOFException ignored) {
-                            }
+                    while (true) {
+                        try {
+                            Object receivedObject = in.readObject();
+                            handle(receivedObject);
+                        } catch (EOFException ignored) {
                         }
-                    } catch (SocketException e) {
-                        System.out.println(e.getMessage());
-                        state = State.ERROR;
-                        System.out.println("Verbindung zum Server fehlgeschlagen. Automatischer Reconnect in 5 Sekunden...");
-                        TimeUnit.SECONDS.sleep(5);
-                    } catch (ClassNotFoundException e) {
-                        throw new RuntimeException(e);
-                    } finally {
-                        // Hier solltest du sicherstellen, dass die Socket-Verbindung geschlossen wird
-                        if (socket != null && !socket.isClosed()) {
-                            try {
-                                socket.close();
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
+                    }
+                } catch (SocketException e) {
+                    System.out.println(e.getMessage());
+                    state = ERROR;
+                    System.out.println("Verbindung zum Server fehlgeschlagen. Automatischer Reconnect in 5 Sekunden...");
+                    TimeUnit.SECONDS.sleep(5);
+                } catch (ClassNotFoundException e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    // Hier solltest du sicherstellen, dass die Socket-Verbindung geschlossen wird
+                    if (socket != null && !socket.isClosed()) {
+                        try {
+                            socket.close();
+                        } catch (IOException e) {
+                            e.printStackTrace();
                         }
                     }
                 }
